@@ -35,73 +35,61 @@
     const table    = document.getElementById('resultsTable');
     const tbody    = table.querySelector('tbody');
 
-    // 1) Mapeia nome → RxCUI, já tratando resposta "Not found"
+    // 1) de nome p/ RxCUI
     async function getRxCUI(drug) {
       const url = 'https://rxnav.nlm.nih.gov/REST/rxcui.json?name='
                 + encodeURIComponent(drug.trim());
       const res = await fetch(url);
-
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`Erro ao buscar "${drug}": ${txt}`);
-      }
-
-      let data;
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error(`Resposta inválida ao buscar "${drug}"`);
-      }
-
-      const ids = data.idGroup?.rxnormId;
-      if (!ids?.length) {
-        throw new Error(`"${drug}" não encontrado no RxNorm`);
-      }
+      if (!res.ok) throw new Error(`Erro ao buscar "${drug}": ${res.statusText}`);
+      const data = await res.json();
+      const ids  = data.idGroup?.rxnormId;
+      if (!ids?.length) throw new Error(`"${drug}" não está no RxNorm`);
       return ids[0];
     }
 
-    // 2) Consulta interações, tratando erros não-JSON e mostrando a URL no console
+    // 2) p/ cada RxCUI chama o interaction.json e filtra só os pares entre os seus rxcuis
     async function fetchInteractions(rxcuis) {
-      const rxcuisParam  = encodeURIComponent(rxcuis.join('+'));
-      const sourcesParam = encodeURIComponent('ONCHigh,DrugBank');
-      const url = `https://rxnav.nlm.nih.gov/REST/interaction/list.json`
-                + `?rxcuis=${rxcuisParam}`
-                + `&sources=${sourcesParam}`;
+      const pairs = [];
+      const seen  = new Set();
 
-      console.log('>>> URL de interação:', url);
+      for (const rxcui of rxcuis) {
+        const url = `https://rxnav.nlm.nih.gov/REST/interaction/interaction.json`
+                  + `?rxcui=${encodeURIComponent(rxcui)}`
+                  + `&sources=ONCHigh,DrugBank`;
+        console.log('>>> fetchInteractions URL:', url);
 
-      const res = await fetch(url);
+        const res = await fetch(url);
+        if (!res.ok) {
+          console.warn(`RxCUI ${rxcui} retornou ${res.status}`);
+          continue;
+        }
+        const data = await res.json();
+        if (!data.interactionTypeGroup) continue;
 
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`Erro na API de interações: ${txt}`);
+        for (const group of data.interactionTypeGroup) {
+          for (const it of group.interactionType) {
+            const [c1, c2] = it.minConcept;
+            const r1 = c1.rxcui, r2 = c2.rxcui;
+            // só guardamos se OS DOIS estiverem na sua lista de entrada
+            if (!rxcuis.includes(r1) || !rxcuis.includes(r2)) continue;
+            // dedupe: ordena ids e junta num “key”
+            const key = [r1, r2].sort().join('-');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            pairs.push({
+              a:        c1.name,
+              b:        c2.name,
+              severity: it.interactionPair[0].severity,
+              desc:     it.interactionPair[0].description
+            });
+          }
+        }
       }
 
-      let data;
-      try {
-        data = await res.json();
-      } catch {
-        throw new Error('Resposta inválida da API de interações');
-      }
-
-      if (data.error) {
-        throw new Error(`API retornou erro: ${data.error}`);
-      }
-
-      return data
-        .interactionTypeGroup
-        .flatMap(g => g.fullInteractionTypeGroup || [])
-        .flatMap(g =>
-          g.interactionType.map(it => ({
-            a:        it.minConcept[0].name,
-            b:        it.minConcept[1].name,
-            severity: it.interactionPair[0].severity,
-            desc:     it.interactionPair[0].description
-          }))
-        );
+      return pairs;
     }
 
-    // 3) Listener do botão
+    // 3) botão
     document.getElementById('checkBtn').addEventListener('click', async () => {
       statusEl.textContent = '';
       statusEl.className   = '';
@@ -109,9 +97,7 @@
       table.hidden         = true;
 
       const drugs = document.getElementById('drugsInput').value
-                     .split('\n')
-                     .map(s => s.trim())
-                     .filter(Boolean);
+                     .split('\n').map(s=>s.trim()).filter(Boolean);
 
       if (drugs.length < 2) {
         statusEl.textContent = 'Digite pelo menos duas drogas.';
@@ -120,13 +106,13 @@
       }
 
       try {
-        statusEl.textContent = 'Buscando RxCUI…';
+        statusEl.textContent = 'Buscando códigos RxCUI…';
         const rxcuis = await Promise.all(drugs.map(getRxCUI));
 
         statusEl.textContent = 'Consultando interações…';
         const interactions = await fetchInteractions(rxcuis);
 
-        if (!interactions.length) {
+        if (interactions.length === 0) {
           statusEl.textContent = 'Nenhuma interação encontrada.';
           return;
         }
@@ -138,13 +124,11 @@
               <td>${i.b}</td>
               <td>${i.severity}</td>
               <td>${i.desc}</td>
-            </tr>
-          `);
+            </tr>`);
         });
 
-        table.hidden = false;
+        table.hidden       = false;
         statusEl.textContent = `Encontradas ${interactions.length} interações.`;
-
       } catch (err) {
         statusEl.textContent = err.message;
         statusEl.className   = 'error';
