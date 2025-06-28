@@ -35,22 +35,30 @@
     const table    = document.getElementById('resultsTable');
     const tbody    = table.querySelector('tbody');
 
-    // 1) Usa approximateTerm para obter o RxCUI mais provável
+    // 1) Lookup por /drugs.json?name=... e escolhe o tty=IN se existir
     async function getRxCUI(drug) {
-      const url = `https://rxnav.nlm.nih.gov/REST/approximateTerm.json`
-                + `?term=${encodeURIComponent(drug.trim())}`
-                + `&maxEntries=1&option=0`;
-      console.log('approximateTerm URL:', url);
+      const url = `https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(drug.trim())}`;
+      console.log('getDrugs URL:', url);
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Erro ao buscar "${drug}": ${res.statusText}`);
       const data = await res.json();
-      const cand = data.approximateGroup?.candidate;
-      if (!cand?.length) throw new Error(`"${drug}" não encontrado.`);
-      console.log(`  → "${drug}" → RxCUI ${cand[0].rxcui} (“${cand[0].name}”)`);
-      return cand[0].rxcui;
+      const groups = data.drugGroup?.conceptGroup || [];
+      // 1a) tenta Ingredient
+      const inGrp = groups.find(g => g.tty === 'IN' && g.conceptProperties?.length);
+      if (inGrp) {
+        console.log(` → "${drug}" IN → RxCUI ${inGrp.conceptProperties[0].rxcui}`);
+        return inGrp.conceptProperties[0].rxcui;
+      }
+      // 1b) fallback SCD (Semantic Clinical Drug)
+      const scdGrp = groups.find(g => g.tty === 'SCD' && g.conceptProperties?.length);
+      if (scdGrp) {
+        console.log(` → "${drug}" SCD → RxCUI ${scdGrp.conceptProperties[0].rxcui}`);
+        return scdGrp.conceptProperties[0].rxcui;
+      }
+      throw new Error(`"${drug}" não possui conceito IN ou SCD em RxNorm`);
     }
 
-    // 2) Para cada RxCUI chama interaction.json e filtra os pares desejados
+    // 2) Para cada RxCUI chama interaction.json e filtra só pares entre os digitados  [oai_citation:0‡coderx.io](https://coderx.io/source-data/drug-interactions?utm_source=chatgpt.com)
     async function fetchInteractions(rxcuis) {
       const pairs = [];
       const seen  = new Set();
@@ -60,20 +68,18 @@
                   + `?rxcui=${encodeURIComponent(rxcui)}`
                   + `&sources=ONCHigh,DrugBank`;
         console.log('interaction URL:', url);
+
         const res = await fetch(url);
-        if (!res.ok) {
-          console.warn(`  RxCUI ${rxcui} → ${res.status} ${res.statusText}`);
-          continue;
-        }
+        console.log('status:', rxcui, res.status);
+        if (!res.ok) continue;
+
         const data = await res.json();
         for (const grp of data.interactionTypeGroup||[]) {
           for (const it of grp.interactionType) {
             const [c1, c2] = it.minConcept;
             const r1 = c1.rxcui, r2 = c2.rxcui;
-            // garante que ambos os RxCUI estão na lista digitada
             if (!rxcuis.includes(r1) || !rxcuis.includes(r2)) continue;
-            // evita duplicatas (ex: A+B e B+A)
-            const key = [r1, r2].sort().join('-');
+            const key = [r1,r2].sort().join('-');
             if (seen.has(key)) continue;
             seen.add(key);
             pairs.push({
@@ -89,7 +95,7 @@
       return pairs;
     }
 
-    // 3) Listener do botão
+    // 3) Listener
     document.getElementById('checkBtn').addEventListener('click', async () => {
       statusEl.textContent = '';
       statusEl.className   = '';
@@ -97,8 +103,7 @@
       table.hidden         = true;
 
       const drugs = document.getElementById('drugsInput').value
-                     .split('\n').map(s => s.trim()).filter(Boolean);
-
+                     .split('\n').map(s=>s.trim()).filter(Boolean);
       if (drugs.length < 2) {
         statusEl.textContent = 'Digite pelo menos duas drogas.';
         statusEl.className   = 'error';
@@ -112,12 +117,11 @@
         statusEl.textContent = 'Consultando interações…';
         const interactions = await fetchInteractions(rxcuis);
 
-        if (interactions.length === 0) {
+        if (!interactions.length) {
           statusEl.textContent = 'Nenhuma interação encontrada.';
           return;
         }
 
-        // preenche tabela
         interactions.forEach(i => {
           tbody.insertAdjacentHTML('beforeend', `
             <tr>
@@ -127,8 +131,7 @@
               <td>${i.desc}</td>
             </tr>`);
         });
-
-        table.hidden         = false;
+        table.hidden = false;
         statusEl.textContent = `Encontradas ${interactions.length} interações.`;
       } catch (err) {
         statusEl.textContent = err.message;
