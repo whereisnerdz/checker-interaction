@@ -2,7 +2,7 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>Drug Interaction Checker</title>
+  <title>Drug Interaction Checker (openFDA)</title>
   <style>
     body { font-family: sans-serif; max-width: 600px; margin: 2rem auto; }
     textarea { width: 100%; height: 80px; }
@@ -23,8 +23,7 @@
       <tr>
         <th>Fármaco A</th>
         <th>Fármaco B</th>
-        <th>Severidade</th>
-        <th>Descrição</th>
+        <th>Descrição da interação</th>
       </tr>
     </thead>
     <tbody></tbody>
@@ -35,67 +34,37 @@
     const table    = document.getElementById('resultsTable');
     const tbody    = table.querySelector('tbody');
 
-    // 1) Lookup por /drugs.json?name=... e escolhe o tty=IN se existir
-    async function getRxCUI(drug) {
-      const url = `https://rxnav.nlm.nih.gov/REST/drugs.json?name=${encodeURIComponent(drug.trim())}`;
-      console.log('getDrugs URL:', url);
+    // 1) Busca o rótulo openFDA e retorna o array drug_interactions
+    async function getInteractionsFromFDA(drug) {
+      const url = `https://api.fda.gov/drug/label.json`
+                + `?search=openfda.generic_name:"${encodeURIComponent(drug)}"`
+                + `&limit=1`;
+      console.log('openFDA label URL:', url);
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`Erro ao buscar "${drug}": ${res.statusText}`);
-      const data = await res.json();
-      const groups = data.drugGroup?.conceptGroup || [];
-      // 1a) tenta Ingredient
-      const inGrp = groups.find(g => g.tty === 'IN' && g.conceptProperties?.length);
-      if (inGrp) {
-        console.log(` → "${drug}" IN → RxCUI ${inGrp.conceptProperties[0].rxcui}`);
-        return inGrp.conceptProperties[0].rxcui;
+      if (!res.ok) {
+        throw new Error(`Erro ao buscar "${drug}" na openFDA: ${res.statusText}`);
       }
-      // 1b) fallback SCD (Semantic Clinical Drug)
-      const scdGrp = groups.find(g => g.tty === 'SCD' && g.conceptProperties?.length);
-      if (scdGrp) {
-        console.log(` → "${drug}" SCD → RxCUI ${scdGrp.conceptProperties[0].rxcui}`);
-        return scdGrp.conceptProperties[0].rxcui;
+      const { results } = await res.json();
+      if (!results || results.length === 0) {
+        throw new Error(`"${drug}" não encontrado na openFDA`);
       }
-      throw new Error(`"${drug}" não possui conceito IN ou SCD em RxNorm`);
+      // pode ser undefined ou string única, padroniza em array
+      let arr = results[0].drug_interactions || [];
+      if (typeof arr === 'string') arr = [arr];
+      return arr;
     }
 
-    // 2) Para cada RxCUI chama interaction.json e filtra só pares entre os digitados  [oai_citation:0‡coderx.io](https://coderx.io/source-data/drug-interactions?utm_source=chatgpt.com)
-    async function fetchInteractions(rxcuis) {
-      const pairs = [];
-      const seen  = new Set();
-
-      for (const rxcui of rxcuis) {
-        const url = `https://rxnav.nlm.nih.gov/REST/interaction/interaction.json`
-                  + `?rxcui=${encodeURIComponent(rxcui)}`
-                  + `&sources=ONCHigh,DrugBank`;
-        console.log('interaction URL:', url);
-
-        const res = await fetch(url);
-        console.log('status:', rxcui, res.status);
-        if (!res.ok) continue;
-
-        const data = await res.json();
-        for (const grp of data.interactionTypeGroup||[]) {
-          for (const it of grp.interactionType) {
-            const [c1, c2] = it.minConcept;
-            const r1 = c1.rxcui, r2 = c2.rxcui;
-            if (!rxcuis.includes(r1) || !rxcuis.includes(r2)) continue;
-            const key = [r1,r2].sort().join('-');
-            if (seen.has(key)) continue;
-            seen.add(key);
-            pairs.push({
-              a:        c1.name,
-              b:        c2.name,
-              severity: it.interactionPair[0].severity,
-              desc:     it.interactionPair[0].description
-            });
-          }
-        }
-      }
-
-      return pairs;
+    // 2) Para duas drogas, cruza as duas listas e vê interseção
+    function crossInteractions(interA, interB, drugA, drugB) {
+      // toda frase de interA que mencione o outro fármaco
+      const hits = [
+        ...interA.filter(txt => txt.toLowerCase().includes(drugB.toLowerCase())),
+        ...interB.filter(txt => txt.toLowerCase().includes(drugA.toLowerCase()))
+      ];
+      // elimina duplicatas
+      return Array.from(new Set(hits));
     }
 
-    // 3) Listener
     document.getElementById('checkBtn').addEventListener('click', async () => {
       statusEl.textContent = '';
       statusEl.className   = '';
@@ -104,35 +73,38 @@
 
       const drugs = document.getElementById('drugsInput').value
                      .split('\n').map(s=>s.trim()).filter(Boolean);
-      if (drugs.length < 2) {
-        statusEl.textContent = 'Digite pelo menos duas drogas.';
+
+      if (drugs.length !== 2) {
+        statusEl.textContent = 'Digite exatamente duas drogas, uma por linha.';
         statusEl.className   = 'error';
         return;
       }
+      const [drugA, drugB] = drugs;
 
       try {
-        statusEl.textContent = 'Buscando códigos RxCUI…';
-        const rxcuis = await Promise.all(drugs.map(getRxCUI));
+        statusEl.textContent = 'Buscando interações na openFDA…';
+        const [interA, interB] = await Promise.all([
+          getInteractionsFromFDA(drugA),
+          getInteractionsFromFDA(drugB)
+        ]);
 
-        statusEl.textContent = 'Consultando interações…';
-        const interactions = await fetchInteractions(rxcuis);
+        const common = crossInteractions(interA, interB, drugA, drugB);
 
-        if (!interactions.length) {
-          statusEl.textContent = 'Nenhuma interação encontrada.';
-          return;
+        if (common.length === 0) {
+          statusEl.textContent = 'Nenhuma interação registrada entre esses dois na openFDA.';
+        } else {
+          common.forEach(txt => {
+            tbody.insertAdjacentHTML('beforeend', `
+              <tr>
+                <td>${drugA}</td>
+                <td>${drugB}</td>
+                <td>${txt}</td>
+              </tr>
+            `);
+          });
+          table.hidden = false;
+          statusEl.textContent = `Encontradas ${common.length} interação(ões).`;
         }
-
-        interactions.forEach(i => {
-          tbody.insertAdjacentHTML('beforeend', `
-            <tr>
-              <td>${i.a}</td>
-              <td>${i.b}</td>
-              <td>${i.severity}</td>
-              <td>${i.desc}</td>
-            </tr>`);
-        });
-        table.hidden = false;
-        statusEl.textContent = `Encontradas ${interactions.length} interações.`;
       } catch (err) {
         statusEl.textContent = err.message;
         statusEl.className   = 'error';
