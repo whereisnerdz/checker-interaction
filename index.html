@@ -49,13 +49,16 @@
       return ids[0];
     }
 
-    // 2) Consulta interações, agora com encodeURIComponent para evitar erros de padrão
+    // 2) Consulta interações com debug da URL
     async function fetchInteractions(rxcuis) {
       const rxcuisParam  = encodeURIComponent(rxcuis.join('+'));
       const sourcesParam = encodeURIComponent('ONCHigh,DrugBank');
       const url = `https://rxnav.nlm.nih.gov/REST/interaction/list.json`
                 + `?rxcuis=${rxcuisParam}`
                 + `&sources=${sourcesParam}`;
+
+      // DEBUG: mostra no console a URL completa que será chamada
+      console.log('>>> URL de interação:', url);
 
       const res  = await fetch(url);
       const data = await res.json();
