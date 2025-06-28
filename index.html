@@ -35,21 +35,32 @@
     const table    = document.getElementById('resultsTable');
     const tbody    = table.querySelector('tbody');
 
-    // 1) Mapeia nome para RxCUI
+    // 1) Mapeia nome → RxCUI, já tratando resposta "Not found"
     async function getRxCUI(drug) {
-      const res = await fetch(
-        'https://rxnav.nlm.nih.gov/REST/rxcui.json?name='
-        + encodeURIComponent(drug.trim())
-      );
-      const data = await res.json();
-      const ids  = data.idGroup?.rxnormId;
-      if (!ids || ids.length === 0) {
-        throw new Error(`"${drug}" não encontrado`);
+      const url = 'https://rxnav.nlm.nih.gov/REST/rxcui.json?name='
+                + encodeURIComponent(drug.trim());
+      const res = await fetch(url);
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`Erro ao buscar "${drug}": ${txt}`);
+      }
+
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error(`Resposta inválida ao buscar "${drug}"`);
+      }
+
+      const ids = data.idGroup?.rxnormId;
+      if (!ids?.length) {
+        throw new Error(`"${drug}" não encontrado no RxNorm`);
       }
       return ids[0];
     }
 
-    // 2) Consulta interações com debug da URL
+    // 2) Consulta interações, tratando erros não-JSON e mostrando a URL no console
     async function fetchInteractions(rxcuis) {
       const rxcuisParam  = encodeURIComponent(rxcuis.join('+'));
       const sourcesParam = encodeURIComponent('ONCHigh,DrugBank');
@@ -57,18 +68,29 @@
                 + `?rxcuis=${rxcuisParam}`
                 + `&sources=${sourcesParam}`;
 
-      // DEBUG: mostra no console a URL completa que será chamada
       console.log('>>> URL de interação:', url);
 
-      const res  = await fetch(url);
-      const data = await res.json();
+      const res = await fetch(url);
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`Erro na API de interações: ${txt}`);
+      }
+
+      let data;
+      try {
+        data = await res.json();
+      } catch {
+        throw new Error('Resposta inválida da API de interações');
+      }
+
       if (data.error) {
-        throw new Error(data.error);
+        throw new Error(`API retornou erro: ${data.error}`);
       }
 
       return data
         .interactionTypeGroup
-        .flatMap(group => group.fullInteractionTypeGroup || [])
+        .flatMap(g => g.fullInteractionTypeGroup || [])
         .flatMap(g =>
           g.interactionType.map(it => ({
             a:        it.minConcept[0].name,
@@ -104,24 +126,25 @@
         statusEl.textContent = 'Consultando interações…';
         const interactions = await fetchInteractions(rxcuis);
 
-        if (!interactions || interactions.length === 0) {
+        if (!interactions.length) {
           statusEl.textContent = 'Nenhuma interação encontrada.';
           return;
         }
 
-        // Preenche a tabela
         interactions.forEach(i => {
-          const row = `<tr>
-            <td>${i.a}</td>
-            <td>${i.b}</td>
-            <td>${i.severity}</td>
-            <td>${i.desc}</td>
-          </tr>`;
-          tbody.insertAdjacentHTML('beforeend', row);
+          tbody.insertAdjacentHTML('beforeend', `
+            <tr>
+              <td>${i.a}</td>
+              <td>${i.b}</td>
+              <td>${i.severity}</td>
+              <td>${i.desc}</td>
+            </tr>
+          `);
         });
 
         table.hidden = false;
         statusEl.textContent = `Encontradas ${interactions.length} interações.`;
+
       } catch (err) {
         statusEl.textContent = err.message;
         statusEl.className   = 'error';
