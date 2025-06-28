@@ -35,19 +35,20 @@
     const table    = document.getElementById('resultsTable');
     const tbody    = table.querySelector('tbody');
 
-    // 1) de nome p/ RxCUI
+    // 1) Nome → RxCUI
     async function getRxCUI(drug) {
       const url = 'https://rxnav.nlm.nih.gov/REST/rxcui.json?name='
                 + encodeURIComponent(drug.trim());
+      console.log('getRxCUI URL:', url);
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`Erro ao buscar "${drug}": ${res.statusText}`);
-      const data = await res.json();
-      const ids  = data.idGroup?.rxnormId;
-      if (!ids?.length) throw new Error(`"${drug}" não está no RxNorm`);
+      console.log('getRxCUI status:', res.status);
+      const obj = await res.json();
+      const ids = obj.idGroup?.rxnormId;
+      if (!ids?.length) throw new Error(`"${drug}" não encontrado no RxNorm`);
       return ids[0];
     }
 
-    // 2) p/ cada RxCUI chama o interaction.json e filtra só os pares entre os seus rxcuis
+    // 2) Para CADA RxCUI chama interaction.json
     async function fetchInteractions(rxcuis) {
       const pairs = [];
       const seen  = new Set();
@@ -56,11 +57,12 @@
         const url = `https://rxnav.nlm.nih.gov/REST/interaction/interaction.json`
                   + `?rxcui=${encodeURIComponent(rxcui)}`
                   + `&sources=ONCHigh,DrugBank`;
-        console.log('>>> fetchInteractions URL:', url);
+        console.log('fetchInteractions URL:', url);
 
         const res = await fetch(url);
+        console.log('fetchInteractions status:', res.status);
         if (!res.ok) {
-          console.warn(`RxCUI ${rxcui} retornou ${res.status}`);
+          console.warn(`  RxCUI ${rxcui} → ${res.statusText}`);
           continue;
         }
         const data = await res.json();
@@ -70,9 +72,8 @@
           for (const it of group.interactionType) {
             const [c1, c2] = it.minConcept;
             const r1 = c1.rxcui, r2 = c2.rxcui;
-            // só guardamos se OS DOIS estiverem na sua lista de entrada
+            // Só pares onde AMBOS estão na lista original
             if (!rxcuis.includes(r1) || !rxcuis.includes(r2)) continue;
-            // dedupe: ordena ids e junta num “key”
             const key = [r1, r2].sort().join('-');
             if (seen.has(key)) continue;
             seen.add(key);
@@ -89,7 +90,7 @@
       return pairs;
     }
 
-    // 3) botão
+    // 3) Listener do botão
     document.getElementById('checkBtn').addEventListener('click', async () => {
       statusEl.textContent = '';
       statusEl.className   = '';
@@ -97,7 +98,9 @@
       table.hidden         = true;
 
       const drugs = document.getElementById('drugsInput').value
-                     .split('\n').map(s=>s.trim()).filter(Boolean);
+                     .split('\n')
+                     .map(s => s.trim())
+                     .filter(Boolean);
 
       if (drugs.length < 2) {
         statusEl.textContent = 'Digite pelo menos duas drogas.';
@@ -127,7 +130,7 @@
             </tr>`);
         });
 
-        table.hidden       = false;
+        table.hidden = false;
         statusEl.textContent = `Encontradas ${interactions.length} interações.`;
       } catch (err) {
         statusEl.textContent = err.message;
